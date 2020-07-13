@@ -1,0 +1,268 @@
+#!/bin/bash
+
+# ======================================================
+# Copyright (c) 2017 xxxxx.com, Inc. All Rights Reserved
+# ------------------------------------------------------
+
+# @file runit
+# @author qb.wu@outlook.com
+# @date 2017/01/02
+# @brief A process runner and monitor for shell good
+#   -coders application. run 'runit -h' for help.
+#   For detail, please reference to:
+#   http://gitlab.xxxxx.com/cmc-shell/runit.
+# ======================================================
+
+set -e -o pipefail
+
+readonly DEFAULT_ENVFILE=.env
+readonly DEFAULT_PROCFILE=Procfile
+readonly EC_VERIFY_ENVFILE=1
+readonly EC_VERIFY_PROCFILE=2
+
+function usage() {
+    echo 'Usage: runit [-c] [-f procfile|Procfile] [-e envfile|.env]'
+}
+
+##########################################################
+# @Brief    :   Clear the comment line.
+# @Globals  :   None
+# @Args     :   textline
+# @Rets     :   0
+# @Stdin    :   None
+# @Stdout   :   None for comment line, otherwise the line.
+##########################################################
+function clear_line() {
+    local line="$1"
+    if [[ "${line}" =~ ^[#$] ]]; then
+        return
+    fi
+    echo "${line}"
+}
+
+##########################################################
+# @Brief    :   Verify the procfile.
+# @Globals  :   ${procfile}, ${EC_VERIFY_PROCFILE}
+# @Args     :   None
+# @Rets     :   0 or ${EC_VERIFY_PROCFILE}
+# @Stdin    :   None
+# @Stdout   :   Fail messages
+##########################################################
+function verify_procfile() {
+    local has_err=0
+    local text="$(<"${procfile}")"
+    local line
+    while read -r line; do
+        if [[ -z "$(clear_line "${line}")" ]]; then
+            continue
+        fi
+        line="${line%%#*}"
+        local name="${line%%:*}"
+        if [[ ! "${line}" =~ ^.+:.+$ ]]; then
+            has_err=${EC_VERIFY_PROCFILE}
+            echo 'no_colon_command'
+        fi
+        if [[ "${name}" =~ [^a-zA-Z0-9_] ]]; then
+            has_err=${EC_VERIFY_PROCFILE}
+            echo 'invalid_char'
+        fi
+    done < <(echo "${text/'\r'/'\n'}")
+    return $has_err
+}
+
+##########################################################
+# @Brief    :   Verify the envfile.
+# @Globals  :   ${envfile}, ${EC_VERIFY_ENVFILE}
+# @Args     :   None
+# @Rets     :   0 or ${EC_VERIFY_ENVFILE}
+# @Stdin    :   None
+# @Stdout   :   Fail messages
+##########################################################
+function verify_envfile() {
+    local has_err=0
+    local text="$(<"${envfile}")"
+    local line
+    while read -r line; do
+        if [[ -z "$(clear_line "${line}")" ]]; then
+            continue
+        fi
+        line="${line%%#*}"
+        if [[ ! "${line}" =~ ^.+=.+$ ]]; then
+            has_err=${EC_VERIFY_ENVFILE}
+            echo 'no_equal_mark'
+        fi
+        if [[ "${line%%=*}" =~ [^a-zA-Z0-9_] ]]; then
+            has_err=${EC_VERIFY_ENVFILE}
+            echo 'invalid_char'
+        fi
+        if [[ "${line}" =~ \s ]]; then
+            has_err=${EC_VERIFY_ENVFILE}
+            echo 'value_have_space'
+        fi
+    done < <(echo "${text/'\r'/'\n'}")
+    return $has_err
+}
+
+##########################################################
+# @Brief    :   Verify the envfile and procfile.
+# @Globals  :   None
+# @Args     :   None
+# @Rets     :   0 or EC_VERIFY_*
+# @Stdin    :   None
+# @Stdout   :   None
+##########################################################
+function verify() {
+    verify_envfile && verify_procfile
+}
+
+##########################################################
+# @Brief    :   Load the environments.
+# @Globals  :   ${envfile}
+# @Args     :   None
+# @Rets     :   0
+# @Stdin    :   None
+# @Stdout   :   None
+##########################################################
+function load_env_file() {
+    local text="$(<"${envfile}")"
+    local line
+    while read -r line; do
+        if [[ -z "$(clear_line "${line}")" ]]; then
+            continue
+        fi
+        line="${line%%#*}"
+        export "${line}"
+    done < <(echo "${text/'\r'/'\n'}")
+}
+
+##########################################################
+# @Brief    :   Print logs to the screen.
+# @Globals  :   ${RANDOM}
+# @Args     :   Log name, command to run
+# @Rets     :   0
+# @Stdin    :   Pids of logged process, messages
+# @Stdout   :   Colored formated log string
+##########################################################
+function log() {
+    local pid
+    read pid
+    echo ${pid} >> .pid
+    local name="$1"
+    shift;
+    local comm="$@"
+    local timestamp="$(date -d now '+%H:%M:%S')"
+    local color=$(((${pid}+${RANDOM})%8+30))
+    printf "\033[%dm%s\t%s\t| %s started with pid %d\033[0m\n" ${color} "${timestamp}" "${name}" "${comm}" ${pid}
+    while read line; do
+        timestamp="$(date -d now '+%H:%M:%S')"
+        printf "\033[%dm%s\t%s\t| %s\033[0m\n" ${color} "${timestamp}" "${name}" "${line}"
+    done
+}
+
+##########################################################
+# @Brief    :   Start the processes.
+# @Globals  :   None
+# @Args     :   No comment textline from procfile
+# @Rets     :   0
+# @Stdin    :   None
+# @Stdout   :   None
+##########################################################
+function run_command() {
+    local line="$*"
+    local name="${line%%:*}"
+    local comm="${line#*:}"
+    local run="$(eval "echo \"${comm}\"")"
+    # When the first command exited or killed, the broken pipe will make the
+    # second subshell exit.
+    /bin/bash -c "echo \$\$ && exec ${run}" 2>&1 | log "${name}" "${run}" &
+}
+
+##########################################################
+# @Brief    :   Wait the processes.
+# @Globals  :   None
+# @Args     :   None
+# @Rets     :   0
+# @Stdin    :   None
+# @Stdout   :   None
+##########################################################
+function wait_all() {
+    declare -ar pids=("$(<.pid)")
+    for p in ${pids[@]}; do
+        wait $p
+    done
+}
+
+##########################################################
+# @Brief    :   Kill the processes.
+# @Globals  :   None
+# @Args     :   None
+# @Rets     :   0
+# @Stdin    :   None
+# @Stdout   :   None
+##########################################################
+function kill_all() {
+    declare -ar pids=("$(<.pid)")
+    set +e
+    for p in ${pids[@]}; do
+        echo "Killing $p"
+        kill -9 $p
+    done
+    set -e
+}
+
+##########################################################
+# @Brief    :   Parse and process the procfile
+# @Globals  :   ${procfile}
+# @Args     :   None
+# @Rets     :   0
+# @Stdin    :   None
+# @Stdout   :   None
+##########################################################
+function run_procfile() {
+    export PORT=${PORT:-8080}
+    trap 'echo Caught CR-C/CR-- && kill_all' SIGINT SIGTERM
+    local text=$(<"${procfile}")
+    while read -r line; do
+        if [[ -z "$(clear_line "${line}")" ]]; then
+            continue
+        fi
+        local line="${line%%#*}"
+        run_command "${line}"
+        if [[ -n $(echo "${line}" | grep '$PORT') ]]; then
+            export PORT=$((${PORT}+1))
+        fi
+    done < <(echo "${text/'\r'/'\n'}")
+    wait_all
+}
+
+function main() {
+    local func=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h) shift; usage; exit 0;;
+            -e) shift; envfile="$1"; shift;;
+            -f) shift; procfile="$1"; shift;;
+            -c) shift; func=1;;
+            *) usage; exit -1;;
+        esac
+    done
+    envfile="${envfile:-${DEFAULT_ENVFILE}}"
+    touch "${envfile}"
+
+    procfile="${procfile:-${DEFAULT_PROCFILE}}"
+    touch "${procfile}"
+
+    verify
+
+    if [[ ${func} -ne 0 ]]; then
+        return 0
+    fi
+
+    :>.pid
+
+    load_env_file
+
+    run_procfile
+}
+
+main "$@"
